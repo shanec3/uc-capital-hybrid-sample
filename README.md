@@ -41,4 +41,11 @@ python main.py --in_file data.xlsx --out_dir results --model {sarima_xgb,lstm} -
 - `.gitignore` excludes all generated outputs, notebooks, and large files
 
 ## Experiment Tracking (optional)
-- Add `wandb.init(project="uc-sample")` or TensorBoard for experiment tracking 
+- Add `wandb.init(project="uc-sample")` or TensorBoard for experiment tracking
+
+
+![2008](https://github.com/user-attachments/assets/00dcd326-2325-4176-a392-034127b08e34)
+![2018](https://github.com/user-attachments/assets/fbdc5797-657b-46fe-8791-2b9b06174a3a)
+![2020](https://github.com/user-attachments/assets/e0c2f929-4596-45b4-b38f-7964299583b2)
+
+
