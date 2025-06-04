@@ -1,0 +1,17 @@
+pandas==2.2.2
+numpy==1.26.4
+openpyxl==3.1.2
+xlsxwriter==3.2.0
+matplotlib==3.8.4
+pillow==10.3.0
+joblib==1.4.2
+tqdm==4.66.4
+statsmodels==0.14.2
+arch==6.3.0
+xgboost==2.0.3
+tensorflow==2.15.0
+talib-binary==0.4.0.18
+scikit-learn==1.4.2
+optuna==3.6.1
+shap==0.45.1
+# For Colab GPU: pip install xgboost-cu116 

@@ -1,2 +1,45 @@
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Excel/outputs
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.pdf
+*.h5
+*.log
+run.log
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+
+# Large files
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
 *.rtf
