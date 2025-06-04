@@ -1,8 +1,10 @@
 import numpy as np
 import pandas as pd
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 from statsforecast.models import AutoARIMA
 import xgboost as xgb
-from .data_utils import _to_num, _parse_cols
+from data_utils import _to_num, _parse_cols
 from joblib import Parallel, delayed, cpu_count
 from tqdm import tqdm
 import talib as ta
@@ -12,6 +14,7 @@ from tensorflow import keras
 from tensorflow.keras import layers, callbacks
 import math
 import random
+from multiprocessing import Value
 
 def build_sarima_xgb(
     raw,
@@ -26,129 +29,131 @@ def build_sarima_xgb(
     use_cuda=False
 ):
     """Build SARIMA-XGB hybrid model and return fitted objects and best exogenous subsets."""
-    np.random.seed(seed)
-    base_feats = ["Lag1", "Lag2", "Lag3"]
-    other_columns = [5,6,8,9,11,12,13,15,16,17,18]
-    exo_cols = other_columns
-    ret = _to_num(raw.iloc[:, 7])
-    exo_df = raw.iloc[:, exo_cols].apply(_to_num)
-    for lag in base_feats:
-        exo_df[lag] = ret.shift(int(lag[-1]))
-    exo_df = exo_df[base_feats + [c for c in exo_df.columns if c not in base_feats]]
-    keep = ret.notna()
-    exo_df = exo_df.fillna(method="ffill")
-    ret = ret[keep].to_numpy()
-    exo = exo_df[keep].to_numpy()
-    idx_t = exo.shape[0]
-    def _auto_sarima(y, x):
-        mdl = AutoARIMA(season_length=12)
-        mdl = mdl.fit(y, X=x if x is not None and x.size else None)
-        return mdl
-    def _forecast_exo_future(X, idx_t):
-        if X.size == 0: return None
-        fut = []
-        for j in range(X.shape[1]):
-            try:
-                mdl = AutoARIMA(season_length=12)
-                fit = mdl.fit(X[:idx_t, j])
-                fut.append(float(fit.predict(1)[0]))
-            except Exception:
-                fut.append(np.nan)
-        return np.array(fut).reshape(1, -1)
-    def _roll_origin_metrics(y, X, scenario):
-        n = len(y)
-        if n <= win_size: return (np.nan, np.nan, np.nan)
-        se = ae = naive_ae = hits = tot = 0
-        for i in range(win_size, n - 1, step_size_ro):
-            y_tr = y[i - win_size:i]
-            X_tr = X[i - win_size:i]
-            if   scenario == "lag0":   X_te = None if X_tr.size == 0 else X[i:i+1]
-            elif scenario == "lag12":  X_te = None if X_tr.size == 0 or i + 1 - lag_12 <= 0 else X_tr[-lag_12:-lag_12+1]
-            else:                      X_te = None if X_tr.size == 0 else _forecast_exo_future(X_tr, X_tr.shape[0])
-            use_x = X_te is not None and X_tr.size
-            try:
-                mdl = _auto_sarima(y_tr, X_tr if use_x else None)
-                fc  = mdl.predict(1, X=X_te)[0] if use_x else mdl.predict(1)[0]
-            except Exception:
-                continue
-            act = y[i]
-            if not np.isnan(fc) and not np.isnan(act):
-                se       += (fc - act) ** 2
-                ae       += abs(fc - act)
-                naive_ae += abs(y_tr[-1] - act)
-                hits     += int(np.sign(fc) == np.sign(act))
-                tot      += 1
-        if tot == 0: return (np.nan, np.nan, np.nan)
-        return round(np.sqrt(se / tot), 4), round(ae / naive_ae, 4), round(hits / tot, 4)
-    def _grid_search(y, X, scenario):
-        n_exo = X.shape[1]
-        combos = range(2 ** n_exo)
-        def _eval(mask):
-            cols = [i for i in range(n_exo) if mask & (1 << i)]
-            X_mat = X[:, cols] if cols else np.empty((len(y), 0))
-            rmse, mase, hit = _roll_origin_metrics(y, X_mat, scenario)
-            subset = ",".join(map(str, cols)) if cols else "None"
-            return subset, rmse, mase, hit
-        res = Parallel(n_jobs=cpu_count())(
-            delayed(_eval)(m) for m in tqdm(combos, desc=f"Grid-{scenario} (2^{n_exo})")
-        )
-        df = pd.DataFrame(res, columns=["ExoSubset", "RMSE", "MASE", "HitRate"])
-        df = df.sort_values(["HitRate", "RMSE", "MASE"], ascending=[False, True, True])
-        df.insert(0, "Rank", range(1, len(df) + 1))
-        return df
-    def _best_xgb(X, y):
-        if X.shape[1] == 0: return None
-        best, best_hit = None, -1
-        from sklearn.model_selection import train_test_split
-        Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.3, random_state=seed)
-        for g in hit_grid:
-            params = {**xgb_base, **g}
-            if use_cuda:
-                params['tree_method'] = 'gpu_hist'
-                params['predictor'] = 'gpu_predictor'
-            mdl = xgb.train(params, xgb.DMatrix(Xtr, label=ytr))
-            pred = np.sign(mdl.predict(xgb.DMatrix(Xte)))
-            hit  = (pred == np.sign(yte)).mean()
-            if hit > best_hit: best, best_hit = mdl, hit
-        return best
-    df0  = _grid_search(ret, exo, "lag0")
-    df12 = _grid_search(ret, exo, "lag12")
-    dfAR = _grid_search(ret, exo, "arimax")
-    sel0  = _parse_cols(df0.iloc[0]["ExoSubset"])
-    sel12 = _parse_cols(df12.iloc[0]["ExoSubset"])
-    selAR = _parse_cols(dfAR.iloc[0]["ExoSubset"])
-    X0  = exo[:, sel0 ] if sel0  else np.empty((idx_t,0))
-    X12 = exo[:, sel12] if sel12 else np.empty((idx_t,0))
-    XAR = exo[:, selAR] if selAR else np.empty((idx_t,0))
-    fit0  = _auto_sarima(ret, X0  if X0.size  else None)
-    fit12 = _auto_sarima(ret, X12 if X12.size else None)
-    fitAR = _auto_sarima(ret, XAR if XAR.size else None)
-    res0  = ret - fit0.predict_in_sample(X=X0 if X0.size else None)
-    res12 = ret - fit12.predict_in_sample(X=X12 if X12.size else None)
-    resAR = ret - fitAR.predict_in_sample(X=XAR if XAR.size else None)
-    xgb0  = _best_xgb(X0 , res0)  if X0.size  else None
-    xgb12 = _best_xgb(X12, res12) if X12.size else None
-    xgbAR = _best_xgb(XAR, resAR) if XAR.size else None
-    return {
-        'ret': ret,
-        'exo': exo,
-        'idx_t': idx_t,
-        'fit0': fit0,
-        'fit12': fit12,
-        'fitAR': fitAR,
-        'xgb0': xgb0,
-        'xgb12': xgb12,
-        'xgbAR': xgbAR,
-        'X0': X0,
-        'X12': X12,
-        'XAR': XAR,
-        'sel0': sel0,
-        'sel12': sel12,
-        'selAR': selAR,
-        'df0': df0,
-        'df12': df12,
-        'dfAR': dfAR
-    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        np.random.seed(seed)
+        base_feats = ["Lag1", "Lag2", "Lag3"]
+        other_columns = [5,6,8,9,11,12,13,15,16,17,18]
+        exo_cols = other_columns
+        ret = _to_num(raw.iloc[:, 7])
+        exo_df = raw.iloc[:, exo_cols].apply(_to_num)
+        for lag in base_feats:
+            exo_df[lag] = ret.shift(int(lag[-1]))
+        exo_df = exo_df[base_feats + [c for c in exo_df.columns if c not in base_feats]]
+        keep = ret.notna()
+        exo_df = exo_df.fillna(method="ffill")
+        ret = ret[keep].to_numpy()
+        exo = exo_df[keep].to_numpy()
+        idx_t = exo.shape[0]
+        def _auto_sarima(y, x):
+            mdl = AutoARIMA(season_length=12)
+            mdl = mdl.fit(y, X=x if x is not None and x.size else None)
+            return mdl
+        def _forecast_exo_future(X, idx_t):
+            if X.size == 0: return None
+            fut = []
+            for j in range(X.shape[1]):
+                try:
+                    mdl = AutoARIMA(season_length=12)
+                    fit = mdl.fit(X[:idx_t, j])
+                    fut.append(float(fit.predict(1)[0]))
+                except Exception:
+                    fut.append(np.nan)
+            return np.array(fut).reshape(1, -1)
+        def _roll_origin_metrics(y, X, scenario):
+            n = len(y)
+            if n <= win_size: return (np.nan, np.nan, np.nan)
+            se = ae = naive_ae = hits = tot = 0
+            for i in range(win_size, n - 1, step_size_ro):
+                y_tr = y[i - win_size:i]
+                X_tr = X[i - win_size:i]
+                if   scenario == "lag0":   X_te = None if X_tr.size == 0 else X[i:i+1]
+                elif scenario == "lag12":  X_te = None if X_tr.size == 0 or i + 1 - lag_12 <= 0 else X_tr[-lag_12:-lag_12+1]
+                else:                      X_te = None if X_tr.size == 0 else _forecast_exo_future(X_tr, X_tr.shape[0])
+                use_x = X_te is not None and X_tr.size
+                try:
+                    mdl = _auto_sarima(y_tr, X_tr if use_x else None)
+                    fc  = mdl.predict(1, X=X_te)[0] if use_x else mdl.predict(1)[0]
+                except Exception:
+                    continue
+                act = y[i]
+                if not np.isnan(fc) and not np.isnan(act):
+                    se       += (fc - act) ** 2
+                    ae       += abs(fc - act)
+                    naive_ae += abs(y_tr[-1] - act)
+                    hits     += int(np.sign(fc) == np.sign(act))
+                    tot      += 1
+            if tot == 0: return (np.nan, np.nan, np.nan)
+            return round(np.sqrt(se / tot), 4), round(ae / naive_ae, 4), round(hits / tot, 4)
+        def _grid_search(y, X, scenario):
+            n_exo = X.shape[1]
+            combos = range(2 ** n_exo)
+            def _eval(mask):
+                cols = [i for i in range(n_exo) if mask & (1 << i)]
+                X_mat = X[:, cols] if cols else np.empty((len(y), 0))
+                rmse, mase, hit = _roll_origin_metrics(y, X_mat, scenario)
+                subset = ",".join(map(str, cols)) if cols else "None"
+                return subset, rmse, mase, hit
+            res = Parallel(n_jobs=cpu_count())(
+                delayed(_eval)(m) for m in combos
+            )
+            df = pd.DataFrame(res, columns=["ExoSubset", "RMSE", "MASE", "HitRate"])
+            df = df.sort_values(["HitRate", "RMSE", "MASE"], ascending=[False, True, True])
+            df.insert(0, "Rank", range(1, len(df) + 1))
+            return df
+        def _best_xgb(X, y):
+            if X.shape[1] == 0: return None
+            best, best_hit = None, -1
+            from sklearn.model_selection import train_test_split
+            Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.3, random_state=seed)
+            for g in hit_grid:
+                params = {**xgb_base, **g}
+                if use_cuda:
+                    params['tree_method'] = 'gpu_hist'
+                    params['predictor'] = 'gpu_predictor'
+                mdl = xgb.train(params, xgb.DMatrix(Xtr, label=ytr))
+                pred = np.sign(mdl.predict(xgb.DMatrix(Xte)))
+                hit  = (pred == np.sign(yte)).mean()
+                if hit > best_hit: best, best_hit = mdl, hit
+            return best
+        df0  = _grid_search(ret, exo, "lag0")
+        df12 = _grid_search(ret, exo, "lag12")
+        dfAR = _grid_search(ret, exo, "arimax")
+        sel0  = _parse_cols(df0.iloc[0]["ExoSubset"])
+        sel12 = _parse_cols(df12.iloc[0]["ExoSubset"])
+        selAR = _parse_cols(dfAR.iloc[0]["ExoSubset"])
+        X0  = exo[:, sel0 ] if sel0  else np.empty((idx_t,0))
+        X12 = exo[:, sel12] if sel12 else np.empty((idx_t,0))
+        XAR = exo[:, selAR] if selAR else np.empty((idx_t,0))
+        fit0  = _auto_sarima(ret, X0  if X0.size  else None)
+        fit12 = _auto_sarima(ret, X12 if X12.size else None)
+        fitAR = _auto_sarima(ret, XAR if XAR.size else None)
+        res0  = ret - fit0.predict_in_sample(X=X0 if X0.size else None)
+        res12 = ret - fit12.predict_in_sample(X=X12 if X12.size else None)
+        resAR = ret - fitAR.predict_in_sample(X=XAR if XAR.size else None)
+        xgb0  = _best_xgb(X0 , res0)  if X0.size  else None
+        xgb12 = _best_xgb(X12, res12) if X12.size else None
+        xgbAR = _best_xgb(XAR, resAR) if XAR.size else None
+        return {
+            'ret': ret,
+            'exo': exo,
+            'idx_t': idx_t,
+            'fit0': fit0,
+            'fit12': fit12,
+            'fitAR': fitAR,
+            'xgb0': xgb0,
+            'xgb12': xgb12,
+            'xgbAR': xgbAR,
+            'X0': X0,
+            'X12': X12,
+            'XAR': XAR,
+            'sel0': sel0,
+            'sel12': sel12,
+            'selAR': selAR,
+            'df0': df0,
+            'df12': df12,
+            'dfAR': dfAR
+        }
 
 def build_lstm(
     raw,

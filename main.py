@@ -3,10 +3,13 @@ import logging
 import sys
 import os
 import pandas as pd
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 from data_utils import _to_num, _parse_cols
 from models import build_sarima_xgb, build_lstm
 from backtest import walk_forward_hybrid, walk_forward_lstm
 import xgboost as xgb
+from tqdm import tqdm
 
 def setup_logging(log_level, out_dir):
     log_path = os.path.join(out_dir, 'run.log')
@@ -47,33 +50,41 @@ def main():
     logging.info(f'CUDA enabled: {use_cuda}')
 
     if args.model == 'sarima_xgb':
-        logging.info('Loading input file...')
-        raw = pd.read_excel(args.in_file, header=0, skiprows=2)
-        params = dict(
-            win_size=120,
-            step_size_ro=5,
-            win_wf=241,
-            step_wf=1,
-            lag_12=12,
-            hit_grid=[dict(max_depth=d, eta=e) for d in [2,3,4] for e in [0.05,0.1,0.2]],
-            xgb_base=dict(
-                max_depth=3, eta=0.1, tree_method="hist", predictor="cpu_predictor",
-                subsample=1, colsample_bytree=1, seed=123, deterministic_histogram=1,
-                objective="reg:squarederror", verbosity=0
-            ),
-            seed=123,
-            use_cuda=use_cuda
-        )
-        logging.info('Building SARIMA-XGB hybrid model...')
-        result = build_sarima_xgb(raw, **params)
-        logging.info('Running walk-forward backtest...')
-        wf0 = walk_forward_hybrid(result['ret'], result['X0'], 'lag0', result['fit0'], result['xgb0'], params['win_wf'], params['step_wf'], params['lag_12'])
-        wf12 = walk_forward_hybrid(result['ret'], result['X12'], 'lag12', result['fit12'], result['xgb12'], params['win_wf'], params['step_wf'], params['lag_12'])
-        wfAR = walk_forward_hybrid(result['ret'], result['XAR'], 'arimax', result['fitAR'], result['xgbAR'], params['win_wf'], params['step_wf'], params['lag_12'])
-        wf0.to_excel(os.path.join(args.out_dir, 'WF_Lag0.xlsx'), index=False)
-        wf12.to_excel(os.path.join(args.out_dir, 'WF_Lag12.xlsx'), index=False)
-        wfAR.to_excel(os.path.join(args.out_dir, 'WF_ARIMAX.xlsx'), index=False)
-        logging.info('Results saved to output directory.')
+        with tqdm(total=4, desc="Processing") as pbar:
+            logging.info('Loading input file...')
+            raw = pd.read_excel(args.in_file, header=0, skiprows=2)
+            pbar.update(1)
+            
+            params = dict(
+                win_size=120,
+                step_size_ro=5,
+                win_wf=241,
+                step_wf=1,
+                lag_12=12,
+                hit_grid=[dict(max_depth=d, eta=e) for d in [2,3,4] for e in [0.05,0.1,0.2]],
+                xgb_base=dict(
+                    max_depth=3, eta=0.1, tree_method="hist", predictor="cpu_predictor",
+                    subsample=1, colsample_bytree=1, seed=123, deterministic_histogram=1,
+                    objective="reg:squarederror", verbosity=0
+                ),
+                seed=123,
+                use_cuda=use_cuda
+            )
+            logging.info('Building SARIMA-XGB hybrid model...')
+            result = build_sarima_xgb(raw, **params)
+            pbar.update(1)
+            
+            logging.info('Running walk-forward backtest...')
+            wf0 = walk_forward_hybrid(result['ret'], result['X0'], 'lag0', result['fit0'], result['xgb0'], params['win_wf'], params['step_wf'], params['lag_12'])
+            wf12 = walk_forward_hybrid(result['ret'], result['X12'], 'lag12', result['fit12'], result['xgb12'], params['win_wf'], params['step_wf'], params['lag_12'])
+            wfAR = walk_forward_hybrid(result['ret'], result['XAR'], 'arimax', result['fitAR'], result['xgbAR'], params['win_wf'], params['step_wf'], params['lag_12'])
+            pbar.update(1)
+            
+            wf0.to_excel(os.path.join(args.out_dir, 'WF_Lag0.xlsx'), index=False)
+            wf12.to_excel(os.path.join(args.out_dir, 'WF_Lag12.xlsx'), index=False)
+            wfAR.to_excel(os.path.join(args.out_dir, 'WF_ARIMAX.xlsx'), index=False)
+            pbar.update(1)
+            logging.info('Results saved to output directory.')
     elif args.model == 'lstm':
         logging.info('Loading input file...')
         raw = pd.read_excel(args.in_file, header=None, skiprows=2)

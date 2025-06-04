@@ -14,4 +14,5 @@ talib-binary==0.4.0.18
 scikit-learn==1.4.2
 optuna==3.6.1
 shap==0.45.1
+statsforecast==2.0.1
 # For Colab GPU: pip install xgboost-cu116 
