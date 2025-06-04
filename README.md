@@ -43,9 +43,15 @@ python main.py --in_file data.xlsx --out_dir results --model {sarima_xgb,lstm} -
 ## Experiment Tracking (optional)
 - Add `wandb.init(project="uc-sample")` or TensorBoard for experiment tracking
 
+## 📈 Sample Output – Actual vs Predicted Returns
 
+The following charts show predicted return series (blue line) versus actual returns (black dots) over different years, using the SARIMA + XGBoost hybrid model.
+
+### Year 2008
 ![2008](https://github.com/user-attachments/assets/00dcd326-2325-4176-a392-034127b08e34)
+### Year 2018
 ![2018](https://github.com/user-attachments/assets/fbdc5797-657b-46fe-8791-2b9b06174a3a)
+### Year 2020
 ![2020](https://github.com/user-attachments/assets/e0c2f929-4596-45b4-b38f-7964299583b2)
 
 
